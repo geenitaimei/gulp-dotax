@@ -41,7 +41,7 @@
     ],
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/XavierCHN/gulp-dotax.git"
+        "url": "git+https://github.com/geenitaimei/gulp-dotax.git"
     },
     "bugs": {
         "url": "https://github.com/XavierCHN/gulp-dotax/issues"
