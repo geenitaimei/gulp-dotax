@@ -40,6 +40,8 @@ export interface SheetToKVOptions {
     addonCSVPath?: string;
     /** addon.csv输出的默认语言，默认为SChinese */
     addonCSVDefaultLang?: string;
+    //给生成的kv表添加自定义名称
+    rootname?:string;
 }
 
 function isSimpleKV(key_row: string[]) {
