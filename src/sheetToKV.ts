@@ -55,6 +55,7 @@ function isEmptyOrNullOrUndefined(value: any) {
 
 export function sheetToKV(options: SheetToKVOptions) {
     const {
+        rootname = "XLSXContent",
         customPinyins = {},
         sheetsIgnore = /^\s*$/,
         verbose = false,
@@ -363,7 +364,7 @@ export function sheetToKV(options: SheetToKVOptions) {
 // ${file.basename} ${sheet_name}
 // SourceCode: https://github.com/XavierCHN/gulp-dotax/blob/master/src/sheetToKV.ts
 // Template: https://github.com/XavierCHN/x-template
-"XLSXContent"
+"${rootname}"
 {
 ${kv_data_str}
 }
