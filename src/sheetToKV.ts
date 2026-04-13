@@ -1,5 +1,4 @@
 //@ts-nocheck
-// 将一个sheet转换为一个kv表的gulp插件
 import through2 from 'through2';
 import xlsx from 'node-xlsx';
 import Vinyl from 'vinyl';
@@ -11,33 +10,19 @@ const cli = require('cli-color');
 const PLUGIN_NAME = 'gulp-dotax:sheetToKV';
 
 export interface SheetToKVOptions {
-  /** 需要略过的表格的正则表达式 */
   sheetsIgnore?: string;
-  /** 是否启用啰嗦模式 */
   verbose?: boolean;
-  /** 是否将汉语转换为拼音 */
   chineseToPinyin?: boolean;
-  /** 自定义的拼音 */
   customPinyins?: Record<string, string>;
-  /** KV的缩进方式，默认为四个空格 */
   indent?: string;
-  /** 是否将只有两列的表输出为简单键值对 */
   autoSimpleKV?: boolean;
-  /** Key行行号，默认为2 */
   keyRowNumber?: number;
-  /** KV文件的扩展名，默认为 .txt */
   kvFileExt?: string;
-  /** 强制输出空格的单元格内容 */
   forceEmptyToken?: string;
-  /** 中文转换为英文的映射列表 */
   aliasList?: Record<string, string>;
-  /** 输出本地化文本到 addon.csv 文件 */
   addonCSVPath?: string;
-  /** addon.csv输出的默认语言 */
   addonCSVDefaultLang?: string;
-  // 给生成的kv表添加自定义名称 (外层大括号的名字)
   rootname?: string;
-  // --- 新增配置：自定义输出的文件名 ---
   outputFilename?: string; 
 }
 
@@ -61,7 +46,7 @@ export function sheetToKV(options: SheetToKVOptions) {
     kvFileExt = '.txt',
     chineseToPinyin = true,
     keyRowNumber = 2,
-    indent = ' ',
+    indent = '    ', // 默认4个空格
     aliasList = {},
     addonCSVPath = null,
     addonCSVDefaultLang = `SChinese`,
@@ -69,10 +54,7 @@ export function sheetToKV(options: SheetToKVOptions) {
   } = options;
 
   customPinyin(customPinyins);
-  const aliasKeys = Object.keys(aliasList)
-    .sort((a, b) => b.length - a.length);
-
-  // 本地化token列表
+  const aliasKeys = Object.keys(aliasList).sort((a, b) => b.length - a.length);
   let locTokens: { [key: string]: string }[] = [];
 
   function convert_chinese_to_pinyin(da: string) {
@@ -85,9 +67,7 @@ export function sheetToKV(options: SheetToKVOptions) {
     let match = s.match(reg);
     if (match != null) {
       match.forEach((m) => {
-        s = s
-          .replace(m, pinyin(m, { toneType: 'none', type: 'array' }).join('_'))
-          .replace('ü', 'v');
+        s = s.replace(m, pinyin(m, { toneType: 'none', type: 'array' }).join('_')).replace('ü', 'v');
       });
     }
     return s;
@@ -96,63 +76,120 @@ export function sheetToKV(options: SheetToKVOptions) {
   function deal_with_kv_value(value: string): string {
     if (/^[0-9]+.?[0-9]*$/.test(value)) {
       let number = parseFloat(value);
-      if (number % 1 !== 0) {
-        value = number.toFixed(4);
-      }
+      if (number % 1 !== 0) value = number.toFixed(4);
     }
     if (value === undefined) return '';
     if (forceEmptyToken === value) return '';
     return value;
   }
 
-  // --- 关键修复：补全了 convert_row_to_kv 的完整逻辑 ---
+  // --- 彻底重写的 convert_row_to_kv ---
+  // 逻辑：先收集内容，最后统一组装，确保大括号层级正确
   function convert_row_to_kv(row: string[], key_row: string[]): string {
-    // 第一列为主键
     let main_key = row[0];
-
-    function checkSpace(str: string) {
-      if (typeof str == 'string' && str.trim != null && str != str.trim()) {
-        console.warn(cli.red(`${main_key} 中的 ${str} 前后有空格，请检查！`));
-      }
+    
+    // 检查空格
+    if (typeof main_key == 'string' && main_key.trim() !== main_key) {
+        console.warn(cli.red(`${main_key} 前后有空格，请检查！`));
     }
-    checkSpace(main_key);
 
     let attachWearablesBlock = false;
     let abilityValuesBlock = false;
     let varIndex = 0;
-    let indentLevel = 1;
     let locAbilitySpecial = null;
+    
+    const baseIndent = indent || '\t';
+    const innerIndent = baseIndent + baseIndent; // 内部缩进
 
-    return key_row
-      .map((key, i) => {
-        // 跳过空的key
-        if (isEmptyOrNullOrUndefined(key)) return;
+    // 1. 收集该行的所有子键值对
+    let contentLines: string[] = [];
 
-        let output_value = row[i];
-        let indentStr = (indent || `\t`).repeat(indentLevel);
+    key_row.forEach((key, i) => {
+      if (isEmptyOrNullOrUndefined(key)) return;
+      
+      // 跳过第一列（主键），只处理数据列
+      if (i === 0) return; 
 
-        // 处理第一列（主键）
-        if (i === 0) {
-          indentLevel++;
-          return `${indentStr}"${main_key}" {`;
+      let output_value = row[i];
+
+      // --- 状态机逻辑 ---
+      if (key === `AttachWearables[{]`) attachWearablesBlock = true;
+      if (attachWearablesBlock && key == `}]`) attachWearablesBlock = false;
+      if (key === `AbilityValues[{]`) abilityValuesBlock = true;
+      if (abilityValuesBlock && key === `}]`) abilityValuesBlock = false;
+
+      // --- 处理特殊块内容 ---
+      
+      // 1. 饰品
+      if (attachWearablesBlock && key !== `AttachWearables[{]`) {
+         if (output_value != `` && output_value != undefined) {
+           if (output_value.toString().trimStart().startsWith('{')) {
+             contentLines.push(`${innerIndent}"${key}" ${output_value}`);
+           } else {
+             contentLines.push(`${innerIndent}"${key}" { "ItemDef" "${output_value}" }`);
+           }
+         }
+         return;
+      }
+
+      // 2. 技能数值
+      if (abilityValuesBlock && key !== `AbilityValues[{]`) {
+        if (isEmptyOrNullOrUndefined(output_value)) return;
+        
+        let values_key = '';
+        if (isNaN(Number(key))) {
+          values_key = key;
+        } else {
+            // 处理像 "100 200" 这种值，第一个数字作为key的情况
+            let datas = output_value.toString().split(' ');
+            if (!isNaN(Number(datas[0]))) {
+                 // 纯数字值，使用默认key
+                 values_key = `var_${varIndex++}`;
+            } else {
+                 values_key = datas[0];
+                 output_value = output_value.replace(`${datas[0]} `, '');
+            }
         }
 
-        // 处理 #Loc 开头的本地化Key
-        if (key.startsWith('#Loc')) {
-          // 这里简化处理，实际逻辑可能更复杂，根据你的需求调整
-          let locKey = key.replace('#Loc', main_key);
-          locTokens.push({ key: locKey, value: output_value });
-          return `${indentStr}// Localized key: ${locKey}`;
+        // 技能本地化
+        if (key == '#ValuesLoc') {
+          if (!isEmptyOrNullOrUndefined(output_value) && output_value.trim() !== ``) {
+             locAbilitySpecial = output_value;
+          }
+          return;
         }
 
-        // 处理普通KV对
-        output_value = deal_with_kv_value(output_value);
+        if (locAbilitySpecial != null) {
+          let locKey = `dota_tooltip_ability_${main_key}_${values_key}`;
+          locTokens.push({ key: locKey, value: locAbilitySpecial });
+          locAbilitySpecial = null;
+        }
 
-        return `${indentStr}"${key}" "${output_value}"`;
-      })
-      .filter((row) => row != null) // 过滤空行
-      .map((s) => (chineseToPinyin ? convert_chinese_to_pinyin(s) : s))
-      .join('\n') + '\n' + `${indent.repeat(indentLevel - 1)}}`; // 结尾的大括号
+        if (output_value != null && output_value.toString().trimStart().startsWith('{')) {
+          contentLines.push(`${innerIndent}"${values_key}" ${output_value}`);
+        } else {
+          contentLines.push(`${innerIndent}"${values_key}" "${output_value}"`);
+        }
+        return;
+      }
+
+      // 3. 普通键值对
+      // 处理本地化标记 #Loc
+      if (key.includes('#Loc')) {
+          if (!isEmptyOrNullOrUndefined(output_value) && output_value.trim() !== ``) {
+             let locKey = key.replace('#Loc', ``).replace(`{}`, main_key);
+             locTokens.push({ key: locKey, value: output_value });
+          }
+          return; 
+      }
+
+      output_value = deal_with_kv_value(output_value);
+      contentLines.push(`${innerIndent}"${key}" "${output_value}"`);
+    });
+
+    // 2. 组装最终字符串：主键 { 内容 }
+    // 注意：这里不再在循环里生成结尾的 }，而是统一在这里生成
+    return `${baseIndent}"${main_key}" {\n${contentLines.join('\n')}\n${baseIndent}}`;
   }
 
   function convert(this: any, file: Vinyl, enc: any, next: Function) {
@@ -175,7 +212,7 @@ export function sheetToKV(options: SheetToKVOptions) {
       let mergedKVContent = '';
       let firstSheetName: string | null = null; 
 
-      workbook.forEach((sheet, index) => {
+      workbook.forEach((sheet) => {
         let sheet_name = sheet.name;
         
         if (new RegExp(sheetsIgnore).test(sheet_name)) {
@@ -183,7 +220,6 @@ export function sheetToKV(options: SheetToKVOptions) {
           return;
         }
 
-        // 记录第一个有效 Sheet 名称
         if (firstSheetName === null) {
           firstSheetName = sheet_name.match(/[\u4e00-\u9fa5]+/g) ? 
             convert_chinese_to_pinyin(sheet_name) : sheet_name;
@@ -197,23 +233,27 @@ export function sheetToKV(options: SheetToKVOptions) {
         if (kv_data.length === 0) return;
 
         let kv_data_str = '';
+        
+        // 简单KV处理 (仅两列)
         if (isSimpleKV(key_row) && autoSimpleKV) {
           const kv_data_simple = kv_data.map((row) => {
             return `\t"${row[0]}" "${row[1]}"`;
           });
           kv_data_str = `${kv_data_simple.join('\n')}`;
         } else {
+          // 复杂KV处理
           const kv_data_complex = kv_data.map((row) => {
             if (isEmptyOrNullOrUndefined(row[0])) return;
             return convert_row_to_kv(row, key_row);
           });
-          kv_data_str = `${kv_data_complex.join('\n')}`;
+          // 过滤掉空行再拼接
+          kv_data_str = kv_data_complex.filter(x => x).join('\n');
         }
 
-        mergedKVContent += kv_data_str + '\n'; 
+        mergedKVContent += `\n// --- Sheet: ${sheet_name} ---\n${kv_data_str}\n`; 
       });
 
-      // --- 文件名逻辑 ---
+      // 文件名逻辑
       let finalFilename: string;
       if (outputFilename) {
         finalFilename = outputFilename;
@@ -223,15 +263,13 @@ export function sheetToKV(options: SheetToKVOptions) {
         finalFilename = path.basename(file.path, path.extname(file.path)) + '_merged';
       }
       const outputBasename = `${finalFilename}${kvFileExt}`;
-      // --- ---
 
       if (mergedKVContent.trim() !== '') {
         const out_put = `// this file is auto-generated by Xavier's sheet_to_kv 
 // Source: ${file.basename}
-// SourceCode: https://github.com/XavierCHN/gulp-dotax/blob/master/src/sheetToKV.ts
 
 "${rootname}" { 
-  ${mergedKVContent}
+${mergedKVContent}
 }
 `;
 
