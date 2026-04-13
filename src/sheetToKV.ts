@@ -23,7 +23,7 @@ export interface SheetToKVOptions {
   addonCSVPath?: string;
   addonCSVDefaultLang?: string;
   rootname?: string;
-  outputFilename?: string; 
+  outputFilename?: string;
 }
 
 function isSimpleKV(key_row: string[]) {
@@ -46,7 +46,7 @@ export function sheetToKV(options: SheetToKVOptions) {
     kvFileExt = '.txt',
     chineseToPinyin = true,
     keyRowNumber = 2,
-    indent = '    ', // 默认4个空格
+    indent = '    ',
     aliasList = {},
     addonCSVPath = null,
     addonCSVDefaultLang = `SChinese`,
@@ -83,12 +83,9 @@ export function sheetToKV(options: SheetToKVOptions) {
     return value;
   }
 
-  // --- 彻底重写的 convert_row_to_kv ---
-  // 逻辑：先收集内容，最后统一组装，确保大括号层级正确
   function convert_row_to_kv(row: string[], key_row: string[]): string {
     let main_key = row[0];
-    
-    // 检查空格
+
     if (typeof main_key == 'string' && main_key.trim() !== main_key) {
         console.warn(cli.red(`${main_key} 前后有空格，请检查！`));
     }
@@ -97,30 +94,44 @@ export function sheetToKV(options: SheetToKVOptions) {
     let abilityValuesBlock = false;
     let varIndex = 0;
     let locAbilitySpecial = null;
-    
-    const baseIndent = indent || '\t';
-    const innerIndent = baseIndent + baseIndent; // 内部缩进
 
-    // 1. 收集该行的所有子键值对
+    const baseIndent = indent || '\t';
+    const innerIndent = baseIndent + baseIndent;
+
+    // --- 修改点 1: 增加 AbilityValues 内容缓存 ---
+    let abilityValuesContent: string[] = [];
+
     let contentLines: string[] = [];
 
     key_row.forEach((key, i) => {
       if (isEmptyOrNullOrUndefined(key)) return;
-      
-      // 跳过第一列（主键），只处理数据列
-      if (i === 0) return; 
+      if (i === 0) return;
 
       let output_value = row[i];
 
-      // --- 状态机逻辑 ---
+      // --- 状态机逻辑控制 ---
       if (key === `AttachWearables[{]`) attachWearablesBlock = true;
       if (attachWearablesBlock && key == `}]`) attachWearablesBlock = false;
-      if (key === `AbilityValues[{]`) abilityValuesBlock = true;
-      if (abilityValuesBlock && key === `}]`) abilityValuesBlock = false;
 
-      // --- 处理特殊块内容 ---
-      
-      // 1. 饰品
+      // 开启 AbilityValues 模式
+      if (key === `AbilityValues[{]`) {
+          abilityValuesBlock = true;
+          abilityValuesContent = []; // 重置缓存
+          return; // 这一列不输出，直接跳过
+      }
+      // 关闭 AbilityValues 模式
+      if (abilityValuesBlock && key === `}]`) {
+          abilityValuesBlock = false;
+          // 模式结束时，生成最终的 KV 块
+          if (abilityValuesContent.length > 0) {
+              contentLines.push(`${innerIndent}"AbilityValues" { ${abilityValuesContent.join(" ")} }`);
+          }
+          return;
+      }
+
+      // --- 块内特殊处理 ---
+
+      // 1. 饰品处理 (原有逻辑)
       if (attachWearablesBlock && key !== `AttachWearables[{]`) {
          if (output_value != `` && output_value != undefined) {
            if (output_value.toString().trimStart().startsWith('{')) {
@@ -132,18 +143,18 @@ export function sheetToKV(options: SheetToKVOptions) {
          return;
       }
 
-      // 2. 技能数值
-      if (abilityValuesBlock && key !== `AbilityValues[{]`) {
+      // 2. AbilityValues 内部数据收集
+      if (abilityValuesBlock) {
+        // 跳过空行
         if (isEmptyOrNullOrUndefined(output_value)) return;
-        
+
         let values_key = '';
+        // 如果 Key 是数字 (如 1, 2)，通常表示该行的 Value 第一个词是 Key
         if (isNaN(Number(key))) {
           values_key = key;
         } else {
-            // 处理像 "100 200" 这种值，第一个数字作为key的情况
             let datas = output_value.toString().split(' ');
             if (!isNaN(Number(datas[0]))) {
-                 // 纯数字值，使用默认key
                  values_key = `var_${varIndex++}`;
             } else {
                  values_key = datas[0];
@@ -151,7 +162,7 @@ export function sheetToKV(options: SheetToKVOptions) {
             }
         }
 
-        // 技能本地化
+        // 本地化标记处理
         if (key == '#ValuesLoc') {
           if (!isEmptyOrNullOrUndefined(output_value) && output_value.trim() !== ``) {
              locAbilitySpecial = output_value;
@@ -165,30 +176,29 @@ export function sheetToKV(options: SheetToKVOptions) {
           locAbilitySpecial = null;
         }
 
+        // 将解析后的键值对存入缓存，格式: "key" "value"
         if (output_value != null && output_value.toString().trimStart().startsWith('{')) {
-          contentLines.push(`${innerIndent}"${values_key}" ${output_value}`);
+          abilityValuesContent.push(`"${values_key}" ${output_value}`);
         } else {
-          contentLines.push(`${innerIndent}"${values_key}" "${output_value}"`);
+          abilityValuesContent.push(`"${values_key}" "${output_value}"`);
         }
         return;
       }
 
-      // 3. 普通键值对
-      // 处理本地化标记 #Loc
+      // 3. 普通键值对处理 (原有逻辑)
       if (key.includes('#Loc')) {
           if (!isEmptyOrNullOrUndefined(output_value) && output_value.trim() !== ``) {
              let locKey = key.replace('#Loc', ``).replace(`{}`, main_key);
              locTokens.push({ key: locKey, value: output_value });
           }
-          return; 
+          return;
       }
 
       output_value = deal_with_kv_value(output_value);
       contentLines.push(`${innerIndent}"${key}" "${output_value}"`);
     });
 
-    // 2. 组装最终字符串：主键 { 内容 }
-    // 注意：这里不再在循环里生成结尾的 }，而是统一在这里生成
+    // 组装最终字符串
     return `${baseIndent}"${main_key}" {\n${contentLines.join('\n')}\n${baseIndent}}`;
   }
 
@@ -210,18 +220,18 @@ export function sheetToKV(options: SheetToKVOptions) {
       const workbook = xlsx.parse(file.contents);
 
       let mergedKVContent = '';
-      let firstSheetName: string | null = null; 
+      let firstSheetName: string | null = null;
 
       workbook.forEach((sheet) => {
         let sheet_name = sheet.name;
-        
+
         if (new RegExp(sheetsIgnore).test(sheet_name)) {
           console.log(cli.red(`${PLUGIN_NAME} Ignoring sheet ${sheet_name}...`));
           return;
         }
 
         if (firstSheetName === null) {
-          firstSheetName = sheet_name.match(/[\u4e00-\u9fa5]+/g) ? 
+          firstSheetName = sheet_name.match(/[\u4e00-\u9fa5]+/g) ?
             convert_chinese_to_pinyin(sheet_name) : sheet_name;
         }
 
@@ -233,27 +243,23 @@ export function sheetToKV(options: SheetToKVOptions) {
         if (kv_data.length === 0) return;
 
         let kv_data_str = '';
-        
-        // 简单KV处理 (仅两列)
+
         if (isSimpleKV(key_row) && autoSimpleKV) {
           const kv_data_simple = kv_data.map((row) => {
             return `\t"${row[0]}" "${row[1]}"`;
           });
           kv_data_str = `${kv_data_simple.join('\n')}`;
         } else {
-          // 复杂KV处理
           const kv_data_complex = kv_data.map((row) => {
             if (isEmptyOrNullOrUndefined(row[0])) return;
             return convert_row_to_kv(row, key_row);
           });
-          // 过滤掉空行再拼接
           kv_data_str = kv_data_complex.filter(x => x).join('\n');
         }
 
-        mergedKVContent += `\n// --- Sheet: ${sheet_name} ---\n${kv_data_str}\n`; 
+        mergedKVContent += `\n// --- Sheet: ${sheet_name} ---\n${kv_data_str}\n`;
       });
 
-      // 文件名逻辑
       let finalFilename: string;
       if (outputFilename) {
         finalFilename = outputFilename;
@@ -265,10 +271,10 @@ export function sheetToKV(options: SheetToKVOptions) {
       const outputBasename = `${finalFilename}${kvFileExt}`;
 
       if (mergedKVContent.trim() !== '') {
-        const out_put = `// this file is auto-generated by Xavier's sheet_to_kv 
+        const out_put = `// this file is auto-generated by Xavier's sheet_to_kv
 // Source: ${file.basename}
 
-"${rootname}" { 
+"${rootname}" {
 ${mergedKVContent}
 }
 `;
